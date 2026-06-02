@@ -1,0 +1,61 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging and build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# PyInstaller generated files
+import os.spec
+*.manifest
+*.toc
+*.pkg
+*.pyz
+base_library.zip
+xref-*.html
+warn-*.txt
+
+# Local browser and driver binaries
+chrome-win64/
+chromedriver.exe
+
+# Packaged executables and archives
+*.exe
+*.rar
+*.zip
+*.7z
+
+# Test, coverage, and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
