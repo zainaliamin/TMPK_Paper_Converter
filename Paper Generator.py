@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import tempfile
+import traceback
 from pathlib import Path
 import tkinter as tk
 from tkinter import Tk, Label, filedialog, messagebox, StringVar, ttk, scrolledtext
@@ -12,9 +13,7 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 def app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -27,6 +26,21 @@ def first_existing_path(paths):
         if path and path.exists():
             return path
     return None
+
+
+def debug_log_path() -> Path:
+    desktop = Path.home() / "Desktop"
+    if desktop.exists():
+        return desktop / "Paper Generator debug.log"
+    return Path(tempfile.gettempdir()) / "Paper Generator debug.log"
+
+
+def append_debug_log(text: str):
+    try:
+        with debug_log_path().open("a", encoding="utf-8") as log_file:
+            log_file.write(text.rstrip() + "\n")
+    except Exception:
+        pass
 
 
 class PaperBatchTool:
@@ -203,8 +217,14 @@ class PaperBatchTool:
             try:
                 driver = self._create_driver()
             except Exception as e:
+                append_debug_log(traceback.format_exc())
                 self._cleanup_chrome_profile()
-                self._ui(lambda: messagebox.showerror("Error", f"Failed to start ChromeDriver: {e}"))
+                log_path = debug_log_path()
+                self._ui(lambda: messagebox.showerror(
+                    "Error",
+                    f"Failed to start ChromeDriver:\n{e}\n\n"
+                    f"Debug log saved at:\n{log_path}",
+                ))
                 return
 
             try:
@@ -292,7 +312,6 @@ class PaperBatchTool:
         """
         Use Selenium + Chrome DevTools to:
         - open the HTML in headless Chrome/Chromium
-        - click the #print button (same as user)
         - apply print media/hide toolbars
         - generate a PDF of the resulting layout
         """
@@ -313,6 +332,11 @@ class PaperBatchTool:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-extensions")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--remote-debugging-port=0")
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-features=RendererCodeIntegrity")
         self._chrome_profile_dir = tempfile.mkdtemp(prefix="paper-tool-chrome-")
         options.add_argument(f"--user-data-dir={self._chrome_profile_dir}")
 
@@ -329,6 +353,22 @@ class PaperBatchTool:
             base_dir / "chromedriver.exe",
             Path(__file__).resolve().parent / "chromedriver.exe" if not getattr(sys, "frozen", False) else None,
         ])
+        append_debug_log(
+            "\n".join([
+                "",
+                "=== ChromeDriver startup ===",
+                f"frozen: {getattr(sys, 'frozen', False)}",
+                f"base_dir: {base_dir}",
+                f"chrome_path: {chrome_path}",
+                f"driver_path: {driver_path}",
+                f"profile_dir: {self._chrome_profile_dir}",
+            ])
+        )
+        if not chrome_path:
+            raise RuntimeError(f"Chrome was not found. Expected bundled Chrome in {base_dir / 'chrome-win64' / 'chrome.exe'}")
+        if not driver_path:
+            raise RuntimeError(f"ChromeDriver was not found. Expected bundled driver in {base_dir / 'chromedriver.exe'}")
+
         service = ChromeService(executable_path=str(driver_path)) if driver_path else ChromeService()
         return webdriver.Chrome(service=service, options=options)
 
@@ -373,18 +413,31 @@ class PaperBatchTool:
         print(f"  [selenium] Opening {file_url}")
         driver.get(file_url)
 
-        # Wait for the print button, then click it (mimics user)
-        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#print")))
-        print("  [selenium] Clicking #print button")
-        driver.find_element(By.CSS_SELECTOR, "#print").click()
+        WebDriverWait(driver, 15).until(
+            lambda current_driver: current_driver.execute_script("return document.readyState") == "complete"
+        )
 
         # Apply print media so @media print rules hide toolbars
         driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"media": "print"})
 
-        # Hide common toolbar/buttons so they don't show up in the PDF
+        # Do not click the page's print button. Some pages call window.print(),
+        # which can open Chrome UI and block the rest of the batch.
         driver.execute_script(
             """
             (function() {
+                window.dispatchEvent(new Event('beforeprint'));
+
+                var style = document.getElementById('__paper_generator_print_style');
+                if (!style) {
+                    style = document.createElement('style');
+                    style.id = '__paper_generator_print_style';
+                    document.head.appendChild(style);
+                }
+                style.textContent = [
+                    'button, .btn, .toolbar, .top-buttons, #print { display: none !important; }',
+                    '@media print { button, .btn, .toolbar, .top-buttons, #print { display: none !important; } }'
+                ].join('\\n');
+
                 var selectors = ['button', '.btn', '.toolbar', '.top-buttons', '#print'];
                 selectors.forEach(function(sel) {
                     document.querySelectorAll(sel).forEach(function(el) {
