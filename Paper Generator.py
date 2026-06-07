@@ -238,7 +238,7 @@ class PaperBatchTool:
                         if changed:
                             changed_count += 1
 
-                        # Create PDF using selenium + clicking #print button
+                        # Create PDF directly through Chrome DevTools.
                         pdf_created = self.export_to_pdf_with_js(html_file, pdf_folder, driver)
                         if pdf_created:
                             pdf_count += 1
