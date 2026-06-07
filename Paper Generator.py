@@ -3,6 +3,7 @@ import shutil
 import sys
 import threading
 import time
+import tempfile
 from pathlib import Path
 import tkinter as tk
 from tkinter import Tk, Label, filedialog, messagebox, StringVar, ttk, scrolledtext
@@ -15,12 +16,17 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# ====== CONFIG: PATHS TO CHROME AND CHROMEDRIVER (optional) ======
-# If you have Chrome/Edge in a non-standard location, set CHROME_PATH.
-# If you have chromedriver in a specific location, set CHROMEDRIVER_PATH.
-CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-CHROMEDRIVER_PATH = r"C:\Users\786\Downloads\chromedriver-win64\chromedriver.exe"  # e.g., r"C:\webdrivers\chromedriver.exe"
-# ======================================================
+def app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent
+
+
+def first_existing_path(paths):
+    for path in paths:
+        if path and path.exists():
+            return path
+    return None
 
 
 class PaperBatchTool:
@@ -37,6 +43,7 @@ class PaperBatchTool:
         self.folder_display = StringVar(value="No folder selected")
         self.logo_display = StringVar(value="No logo selected")
         self.progress_var = tk.DoubleVar(value=0.0)
+        self._chrome_profile_dir = None
 
         # --- Layout containers ---
         main = ttk.Frame(root, padding=(24, 24, 24, 24), style="Card.TFrame")
@@ -196,6 +203,7 @@ class PaperBatchTool:
             try:
                 driver = self._create_driver()
             except Exception as e:
+                self._cleanup_chrome_profile()
                 self._ui(lambda: messagebox.showerror("Error", f"Failed to start ChromeDriver: {e}"))
                 return
 
@@ -227,6 +235,7 @@ class PaperBatchTool:
                 ))
             finally:
                 driver.quit()
+                self._cleanup_chrome_profile()
         finally:
             self._running = False
             self._ui(lambda: self.run_button.config(state="normal"))
@@ -303,24 +312,30 @@ class PaperBatchTool:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        # Prefer bundled Chrome if running from frozen bundle
-        if getattr(sys, "frozen", False):
-            bundled_chrome = Path(getattr(sys, "_MEIPASS", "")) / "chrome-win64" / "chrome.exe"
-            if bundled_chrome.exists():
-                options.binary_location = str(bundled_chrome)
-        if CHROME_PATH and Path(CHROME_PATH).exists():
-            options.binary_location = CHROME_PATH
+        options.add_argument("--disable-extensions")
+        self._chrome_profile_dir = tempfile.mkdtemp(prefix="paper-tool-chrome-")
+        options.add_argument(f"--user-data-dir={self._chrome_profile_dir}")
 
-        # Prefer bundled chromedriver if present in frozen bundle
-        if getattr(sys, "frozen", False):
-            bundled_driver = Path(getattr(sys, "_MEIPASS", "")) / "chromedriver.exe"
-            if bundled_driver.exists():
-                service = ChromeService(executable_path=str(bundled_driver))
-            else:
-                service = ChromeService(executable_path=CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else ChromeService()
-        else:
-            service = ChromeService(executable_path=CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else ChromeService()
+        base_dir = app_base_dir()
+        chrome_path = first_existing_path([
+            base_dir / "chrome-win64" / "chrome.exe",
+            Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+        ])
+        if chrome_path:
+            options.binary_location = str(chrome_path)
+
+        driver_path = first_existing_path([
+            base_dir / "chromedriver.exe",
+            Path(__file__).resolve().parent / "chromedriver.exe" if not getattr(sys, "frozen", False) else None,
+        ])
+        service = ChromeService(executable_path=str(driver_path)) if driver_path else ChromeService()
         return webdriver.Chrome(service=service, options=options)
+
+    def _cleanup_chrome_profile(self):
+        if self._chrome_profile_dir:
+            shutil.rmtree(self._chrome_profile_dir, ignore_errors=True)
+            self._chrome_profile_dir = None
 
     def _set_status(self, text: str):
         # Schedule status updates on the main thread
@@ -335,7 +350,7 @@ class PaperBatchTool:
             return
         percent = round((processed / total) * 100, 1)
         self._ui(lambda: self.progress_var.set(percent))
-        self._ui(lambda: self.progress_text.config(text=f"{processed}/{total} files • {percent}%"))
+        self._ui(lambda: self.progress_text.config(text=f"{processed}/{total} files - {percent}%"))
 
     def _log(self, text: str):
         def inner():
