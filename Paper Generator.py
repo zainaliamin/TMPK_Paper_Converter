@@ -1,4 +1,5 @@
 import base64
+import os
 import shutil
 import sys
 import threading
@@ -41,6 +42,18 @@ def append_debug_log(text: str):
             log_file.write(text.rstrip() + "\n")
     except Exception:
         pass
+
+
+def image_to_data_url(image_path: Path) -> str:
+    ext = image_path.suffix.lower().lstrip(".")
+    if ext == "jpg":
+        ext = "jpeg"
+    elif ext == "svg":
+        ext = "svg+xml"
+    mime = f"image/{ext}"
+    data = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return f"data:{mime};base64,{data}"
+
 
 
 class PaperBatchTool:
@@ -211,7 +224,14 @@ class PaperBatchTool:
             pdf_folder = parent / f"{folder_name}_pdf"
             pdf_folder.mkdir(exist_ok=True)
 
-            changed_count = 0
+            # Prepare logo data URL once for the batch
+            logo_data_url = None
+            if self.logo_path and self.logo_path.exists():
+                try:
+                    logo_data_url = image_to_data_url(self.logo_path)
+                except Exception as e:
+                    print(f"Failed to read logo image: {e}")
+
             pdf_count = 0
 
             try:
@@ -234,12 +254,9 @@ class PaperBatchTool:
                 for idx, html_file in enumerate(html_files, start=1):
                     self._set_status(f"Processing {idx}/{total}: {html_file.name}")
                     try:
-                        changed = self.process_html_file(html_file, new_name)
-                        if changed:
-                            changed_count += 1
-
-                        # Create PDF directly through Chrome DevTools.
-                        pdf_created = self.export_to_pdf_with_js(html_file, pdf_folder, driver)
+                        pdf_created = self.export_to_pdf_with_js(
+                            html_file, pdf_folder, driver, new_name, logo_data_url
+                        )
                         if pdf_created:
                             pdf_count += 1
                         processed += 1
@@ -249,7 +266,6 @@ class PaperBatchTool:
                 self._ui(lambda: messagebox.showinfo(
                     "Done",
                     f"HTML files found: {len(html_files)}\n"
-                    f"Text/logo changed in: {changed_count}\n"
                     f"PDFs created: {pdf_count}\n\n"
                     f"PDF folder:\n{pdf_folder}",
                 ))
@@ -308,18 +324,21 @@ class PaperBatchTool:
 
     # ---------- Core logic: export to PDF using page JS ----------
 
-    def export_to_pdf_with_js(self, html_path: Path, pdf_folder: Path, driver) -> bool:
+    def export_to_pdf_with_js(
+        self, html_path: Path, pdf_folder: Path, driver, new_name: str, logo_data_url: str | None
+    ) -> bool:
         """
         Use Selenium + Chrome DevTools to:
         - open the HTML in headless Chrome/Chromium
-        - apply print media/hide toolbars
+        - update school name and logo directly via DOM
+        - heal DOM if heading was previously split
         - generate a PDF of the resulting layout
         """
         rel_path = html_path.relative_to(self.folder_path)
         pdf_path = (pdf_folder / rel_path).with_suffix(".pdf")
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._selenium_export(driver, html_path, pdf_path)
+            self._selenium_export(driver, html_path, pdf_path, new_name, logo_data_url)
             return pdf_path.exists()
         except Exception as e:
             print(f"  Failed to create PDF for {html_path}: {e}")
@@ -341,10 +360,13 @@ class PaperBatchTool:
         options.add_argument(f"--user-data-dir={self._chrome_profile_dir}")
 
         base_dir = app_base_dir()
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
         chrome_path = first_existing_path([
             base_dir / "chrome-win64" / "chrome.exe",
+            Path(__file__).resolve().parent / "chrome-win64" / "chrome.exe" if not getattr(sys, "frozen", False) else None,
             Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
             Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+            Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe" if local_app_data else None,
         ])
         if chrome_path:
             options.binary_location = str(chrome_path)
@@ -408,7 +430,9 @@ class PaperBatchTool:
                 self.status_badge.config(text="Idle", bg="#e5e7eb", fg="#374151")
         self._ui(inner)
 
-    def _selenium_export(self, driver, html_path: Path, pdf_path: Path):
+    def _selenium_export(
+        self, driver, html_path: Path, pdf_path: Path, new_name: str, logo_data_url: str | None
+    ):
         file_url = "file:///" + str(html_path.resolve()).replace("\\", "/")
         print(f"  [selenium] Opening {file_url}")
         driver.get(file_url)
@@ -420,11 +444,39 @@ class PaperBatchTool:
         # Apply print media so @media print rules hide toolbars
         driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"media": "print"})
 
-        # Do not click the page's print button. Some pages call window.print(),
-        # which can open Chrome UI and block the rest of the batch.
+        # Update school name, logo, and heal headings in the live DOM
         driver.execute_script(
             """
-            (function() {
+            (function(newName, logoDataUrl) {
+                // 1. Update school name across all header variations
+                var nameSelectors = [
+                    '.school_name_h3',
+                    '#school_name_h3',
+                    'h3.school_name_h3',
+                    'h4.school_name_h3',
+                    'h6.school_name_h3'
+                ];
+                nameSelectors.forEach(function(sel) {
+                    document.querySelectorAll(sel).forEach(function(el) {
+                        el.textContent = newName;
+                    });
+                });
+
+                // 2. Update logo and watermark across all image elements
+                if (logoDataUrl) {
+                    document.querySelectorAll('#mn_logo, #watermarkLogo img, img.school_logo, .centered').forEach(function(img) {
+                        img.src = logoDataUrl;
+                    });
+                }
+
+                // 3. Heal any headings that were left empty by previous legacy scripts
+                document.querySelectorAll('h3.subjective').forEach(function(h3) {
+                    if (!h3.textContent.trim() && h3.nextElementSibling && h3.nextElementSibling.tagName === 'P') {
+                        h3.appendChild(h3.nextElementSibling);
+                    }
+                });
+
+                // 4. Hide toolbar and print buttons
                 window.dispatchEvent(new Event('beforeprint'));
 
                 var style = document.getElementById('__paper_generator_print_style');
@@ -445,8 +497,10 @@ class PaperBatchTool:
                         el.style.display = 'none';
                     });
                 });
-            })();
-            """
+            })(arguments[0], arguments[1]);
+            """,
+            new_name,
+            logo_data_url,
         )
 
         # Short pause for layout changes
