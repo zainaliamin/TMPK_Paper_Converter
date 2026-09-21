@@ -464,17 +464,12 @@ class PaperBatchTool:
 
                 // 2. Update logo and watermark across all image elements
                 if (logoDataUrl) {
-                    document.querySelectorAll('#mn_logo, #watermarkLogo img, img.school_logo, .centered').forEach(function(img) {
+                    document.querySelectorAll('#mn_logo, #watermarkLogo img').forEach(function(img) {
                         img.src = logoDataUrl;
                     });
                 }
 
-                // 3. Heal any headings that were left empty by previous legacy scripts
-                document.querySelectorAll('h3.subjective').forEach(function(h3) {
-                    if (!h3.textContent.trim() && h3.nextElementSibling && h3.nextElementSibling.tagName === 'P') {
-                        h3.appendChild(h3.nextElementSibling);
-                    }
-                });
+
 
                 // 4. Hide toolbar and print buttons
                 window.dispatchEvent(new Event('beforeprint'));
