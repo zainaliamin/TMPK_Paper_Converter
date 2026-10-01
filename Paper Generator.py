@@ -317,6 +317,30 @@ class PaperBatchTool:
         else:
             print(f"  No <img id='mn_logo'> found in: {html_path.name}")
 
+        # --- Update background watermark ---
+        if self.logo_path and self.logo_path.exists():
+            bg_container = soup.select_one("#watermarkLogo .background, #watermarkLogo > .background, .background")
+            if bg_container:
+                existing_wm_img = bg_container.find("img")
+                if existing_wm_img:
+                    src = existing_wm_img.get("src", "")
+                    if src and not src.startswith("data:"):
+                        html_dir = html_path.parent
+                        wm_file_path = (html_dir / src).resolve()
+                        wm_file_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(self.logo_path, wm_file_path)
+                        changed = True
+                else:
+                    for el in bg_container.find_all(class_="watermark") + bg_container.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p"]):
+                        el.decompose()
+                    new_img = soup.new_tag("img", attrs={
+                        "class": "centered",
+                        "src": image_to_data_url(self.logo_path),
+                        "style": "display: block; margin: 0 auto; opacity: 0.15; max-width: 380px; max-height: 380px; object-fit: contain;"
+                    })
+                    bg_container.append(new_img)
+                    changed = True
+
         if changed:
             html_path.write_text(str(soup), encoding="utf-8")
 
@@ -441,13 +465,31 @@ class PaperBatchTool:
             lambda current_driver: current_driver.execute_script("return document.readyState") == "complete"
         )
 
+        # Collect local math / SVG images (e.g. svg.image, svg.latex) so Chrome renders them with proper SVG data URLs
+        math_data_map = {}
+        try:
+            html_dir = html_path.parent
+            for img_file in html_dir.glob("*/*"):
+                if img_file.is_file() and (img_file.name.endswith(".image") or img_file.name.endswith(".latex") or img_file.name.endswith(".svg")):
+                    try:
+                        content = img_file.read_bytes()
+                        if b"<svg" in content:
+                            b64 = base64.b64encode(content).decode("utf-8")
+                            data_url = f"data:image/svg+xml;base64,{b64}"
+                            math_data_map[f"./{img_file.parent.name}/{img_file.name}"] = data_url
+                            math_data_map[f"{img_file.parent.name}/{img_file.name}"] = data_url
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # Apply print media so @media print rules hide toolbars
         driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"media": "print"})
 
-        # Update school name, logo, and heal headings in the live DOM
+        # Update school name, logo, heal headings, and embed math SVGs in the live DOM
         driver.execute_script(
             """
-            (function(newName, logoDataUrl) {
+            (function(newName, logoDataUrl, mathDataMap) {
                 // 1. Update school name across all header variations
                 var nameSelectors = [
                     '.school_name_h3',
@@ -462,14 +504,81 @@ class PaperBatchTool:
                     });
                 });
 
-                // 2. Update logo and watermark across all image elements
+                // 2. Update logo and watermark strictly for school headers and watermarks
                 if (logoDataUrl) {
-                    document.querySelectorAll('#mn_logo, #watermarkLogo img').forEach(function(img) {
+                    // 2a. Update header logos (e.g. #mn_logo, .logoPaper img)
+                    var headerLogoSelectors = [
+                        '#mn_logo',
+                        '.logoPaper img'
+                    ];
+                    document.querySelectorAll(headerLogoSelectors.join(', ')).forEach(function(img) {
+                        if (img.classList.contains('mathImg') || img.closest('.questions, .options, .objective, .subjective, .td_serial')) {
+                            return;
+                        }
                         img.src = logoDataUrl;
+                    });
+
+                    // 2b. Update or insert background watermark logo
+                    var wmLogo = document.getElementById('watermarkLogo');
+                    if (wmLogo && !wmLogo.querySelector('.background')) {
+                        var newBg = document.createElement('div');
+                        newBg.className = 'background';
+                        wmLogo.insertBefore(newBg, wmLogo.firstChild);
+                    }
+
+                    var bgContainers = document.querySelectorAll('#watermarkLogo .background, .background, #background');
+                    bgContainers.forEach(function(bg) {
+                        if (bg.id === 'paper' || bg.querySelector('#paper') || bg.closest('#paper, .questions, .options, .objective, .subjective, .td_serial')) {
+                            return;
+                        }
+
+                        var existingImg = bg.querySelector('img');
+                        if (existingImg) {
+                            if (!existingImg.classList.contains('mathImg')) {
+                                existingImg.src = logoDataUrl;
+                            }
+                        } else {
+                            // No img in watermark background: clear text/placeholders and inject new watermark img
+                            bg.querySelectorAll('.watermark, h1, h2, h3, h4, h5, h6, p').forEach(function(el) {
+                                el.remove();
+                            });
+                            bg.textContent = '';
+
+                            var wmImg = document.createElement('img');
+                            wmImg.className = 'centered';
+                            wmImg.src = logoDataUrl;
+                            wmImg.style.display = 'block';
+                            wmImg.style.marginLeft = 'auto';
+                            wmImg.style.marginRight = 'auto';
+                            wmImg.style.opacity = '0.15';
+                            wmImg.style.maxWidth = '380px';
+                            wmImg.style.maxHeight = '380px';
+                            wmImg.style.objectFit = 'contain';
+
+                            bg.appendChild(wmImg);
+                        }
+                    });
+
+                    // 2c. Safety cleanup: remove any remaining text watermarks outside question sections
+                    document.querySelectorAll('.watermark').forEach(function(wm) {
+                        if (wm.closest('#paper, .questions, .options, .objective, .subjective, .td_serial')) {
+                            return;
+                        }
+                        if (wm.tagName.toLowerCase() !== 'img') {
+                            wm.remove();
+                        }
                     });
                 }
 
-
+                // 3. Ensure local math formula SVGs (.image, .latex) render properly as data URLs
+                if (mathDataMap) {
+                    document.querySelectorAll('img').forEach(function(img) {
+                        var src = img.getAttribute('src');
+                        if (src && mathDataMap[src]) {
+                            img.src = mathDataMap[src];
+                        }
+                    });
+                }
 
                 // 4. Hide toolbar and print buttons
                 window.dispatchEvent(new Event('beforeprint'));
@@ -492,10 +601,11 @@ class PaperBatchTool:
                         el.style.display = 'none';
                     });
                 });
-            })(arguments[0], arguments[1]);
+            })(arguments[0], arguments[1], arguments[2]);
             """,
             new_name,
             logo_data_url,
+            math_data_map,
         )
 
         # Short pause for layout changes
